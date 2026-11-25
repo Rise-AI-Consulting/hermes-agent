@@ -461,6 +461,35 @@ Requires `discord.auto_thread: true` (with it off, nothing threads anywhere). [`
 
 `DISCORD_FREE_RESPONSE_AUTO_THREAD` wins over the `config.yaml` key when both are set — the YAML value only seeds the env var when it isn't already set, like every other `discord.*` bridge.
 
+#### `discord.thread_routing`
+
+Default: `legacy` (existing auto-thread behavior). Set to `plugin` to let an
+explicitly enabled standalone routing plugin choose inline, a new thread, or an
+eligible existing thread through the [`gateway_thread_route` hook](../../developer-guide/plugins/index.md#selective-thread-routing).
+The core ships no external classifier and sends no vendor requests by itself.
+
+```yaml
+discord:
+  auto_thread: true
+  thread_routing: plugin
+```
+
+Quick questions and uncertain/error decisions can stay inline, while substantive
+new work gets a new thread. Continuations may reuse one of the requester's last
+eight selectively created threads under the same parent channel and profile,
+tracked since gateway startup. Other users' threads, private/locked/archived
+threads, and targets without requester/bot view/send permission are never offered.
+No transcript or guild-wide thread search is performed. Restart clears this index;
+a manually opened thread still works normally, but is not added as a candidate.
+
+Existing auto-thread exclusions still win (`auto_thread: false`, DMs, existing
+threads, reply messages, no-thread channels, voice-linked channels, and
+free-response channels unless `free_response_auto_thread: true`). Slash commands
+bypass selective routing. Missing plugins, errors, and deadlines fall back inline;
+selective thread creation failure also dispatches inline rather than losing input.
+Plugins that call external services must disclose outbound data and require
+separate opt-in. Omit this setting to retain the existing behavior.
+
 #### `discord.auto_thread`
 
 **Type:** boolean — **Default:** `true`

@@ -34,6 +34,7 @@ from agent.async_utils import (consume_detached_task_result as _consume_backgrou
 from agent.display import ToolPreview
 from agent.i18n import get_language, t
 from agent.retry_utils import parse_retry_after_seconds
+from plugins.platforms.discord.thread_routing import notify_failed_creation, select_thread
 
 logger = logging.getLogger(__name__)
 
@@ -5934,6 +5935,7 @@ class DiscordAdapter(DiscordLiveGatesMixin, DiscordCommandSyncMixin, DiscordAuth
                     return False
         # Auto-thread: isolate each @mention in a text channel into its own thread (Slack-style).
         auto_threaded_channel = None
+        auto_thread_created = False
         if not is_thread and not isinstance(message.channel, discord.DMChannel):
             no_thread_channels = self._get_no_thread_channels()
             # Voice-linked and reply exclusions live in the auto-thread gate below, not in skip_thread.
@@ -5942,8 +5944,9 @@ class DiscordAdapter(DiscordLiveGatesMixin, DiscordCommandSyncMixin, DiscordAuth
             )
             auto_thread = self._extra_or_env_flag("auto_thread", "DISCORD_AUTO_THREAD", "true", truthy=True)
             is_reply_message = getattr(message, "type", None) == discord.MessageType.reply
+            selective_routing = self.config.extra.get("thread_routing") == "plugin"
             if auto_thread and not skip_thread and not is_voice_linked_channel and not is_reply_message:
-                thread = await self._auto_create_thread(message)
+                thread, auto_thread_created = await select_thread(self, message, selective_routing, normalized_content)
                 if thread:
                     parent_channel_id = str(message.channel.id)
                     is_thread = True
@@ -5955,23 +5958,11 @@ class DiscordAdapter(DiscordLiveGatesMixin, DiscordCommandSyncMixin, DiscordAuth
                     self._dedup.is_duplicate(str(thread.id))
                     auto_threaded_channel = thread
                     await self._threads.mark_async(thread_id)
-                else:
-                    # Auto-threading is the routing target; do NOT fall back to an inline parent-channel
-                    # reply (dumps the task into a shared channel). Surface an error and skip the run.
-                    try:
-                        # That breaks thread-first Discord workflows by dumping a new task into a shared
-                        # channel. Surface a short visible error so the user can retry once Discord
-                        # recovers, and skip agent invocation for this message. See #20243.
-                        await message.channel.send(
-                            self.warning_text(
-                                t("platform.discord.thread.auto_create_failed"),
-                                t("platform.discord.thread.auto_create_failed_generic"))
-                        )
-                    except Exception as notify_error:
-                        logger.warning(
-                            "[%s] Failed to notify user of auto-thread failure: %s", self.name,
-                            notify_error,
-                        )
+                elif not selective_routing:
+                    # Preserve thread-first workflows' visible failure instead of spilling inline (#20243).
+                    await notify_failed_creation(message, self.warning_text(
+                        t("platform.discord.thread.auto_create_failed"),
+                        t("platform.discord.thread.auto_create_failed_generic")))
                     return False
         referenced_attachments = []
         reference = getattr(message, "reference", None)
@@ -6013,11 +6004,11 @@ class DiscordAdapter(DiscordLiveGatesMixin, DiscordCommandSyncMixin, DiscordAuth
             parent_chat_id=parent_channel_id,
             message_id=str(message.id),
             role_authorized=role_authorized,
-            auto_thread_created=auto_threaded_channel is not None,
+            auto_thread_created=auto_thread_created,
             auto_thread_initial_name=(
                 getattr(auto_threaded_channel, "_hermes_auto_thread_initial_name", None)
                 or self._derive_auto_thread_name(message.content or "")
-            ) if auto_threaded_channel is not None else None,
+            ) if auto_thread_created else None,
         )
         media_urls, media_types, media_text_inlined, pending_text_injection = await self._collect_attachment_media(
             all_attachments)

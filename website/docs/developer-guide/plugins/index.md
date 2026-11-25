@@ -1778,6 +1778,42 @@ The kanban lifecycle hooks fire **after** the board DB change commits, so a call
 
 The **API request hooks** are observers for the raw provider request, one level below the per-turn `pre_llm_call` / `post_llm_call` pair: a single turn that calls tools makes several API requests, and these hooks fire around each one. They exist for observability plugins (tracing, cost accounting, latency dashboards). The `request` and `response` kwargs are sanitized, size-capped JSON views of the provider payload (sensitive keys redacted, long strings truncated, SDK objects normalized), and `usage` is a plain token-summary dict. Every payload carries the correlation fields `turn_id`, `api_request_id`, `task_id`, `session_id`, and `api_call_count`, so a plugin can stitch requests, tool calls, and turns together. `api_request_error` fires when a provider call raises and adds `status_code`, `retry_count` / `max_retries`, `retryable`, `reason`, and an `error` dict with `type` and `message`.
 
+### Selective thread routing (`gateway_thread_route`) {#selective-thread-routing}
+
+This opt-in directive hook is a narrow alternative to unconditional Discord auto-threading.
+`pre_gateway_dispatch` runs after the adapter has already chosen its thread, and
+`ctx.platform_actions` currently offers reactions/titles rather than message-routing policy;
+neither can implement this decision safely. No adapter handles are exposed by this hook.
+
+Callbacks receive keyword fields `platform: str`, `text: str` (at most 4,000 characters),
+and `candidates: dict[str, str]` (at most eight opaque keys mapped to titles of at most
+100 characters). Return `{"choice": "inline"}`, `{"choice": "new_thread"}`, or one of
+those candidate keys. Only the first hook result is considered; no result, a malformed
+choice, a hook error, or a five-second deadline means inline. The host independently
+validates candidates before disclosure and after awaiting the decision. A plugin must
+not return arbitrary platform IDs. Plugins register with
+`ctx.register_hook("gateway_thread_route", callback)`.
+
+The Discord caller authorizes the requester before invoking the hook, resolves the
+canonical routing identity, and binds the runtime profile for discovery/config/secrets.
+A source whose identity cannot resolve is not sent to a plugin. Candidates are public,
+unlocked, unarchived threads created by selective routing for this same requester,
+parent channel, guild, and profile **in the current gateway process**. Requester and bot
+must retain view/send permission; a candidate routed to another runtime profile is
+excluded. The in-memory LRU holds at most 128 requester/channel/profile lanes and eight
+threads per lane. No transcripts or arbitrary guild thread listings are consulted.
+
+Enable `discord.thread_routing: plugin` in addition to `discord.auto_thread: true`.
+Existing DM/thread, reply, no-thread-channel, voice-linked-channel, and free-response
+exclusions still win; slash commands bypass the decision. Thread creation failure
+falls back to inline in this mode, never silently consumes the message. With the
+setting omitted or `legacy`, the previous auto-thread behavior remains unchanged.
+A plugin using a third-party classifier must separately require explicit opt-in and
+disclose outbound message/title data. The generic host does not supply vendor credentials.
+
+Platform authors may use the public `hermes_cli.lifecycle` dispatcher for lifecycle
+hooks; consumers register through `ctx` rather than modifying adapters at runtime.
+
 ### Where each hook fires {#hook-fire-sites}
 
 Every name in `hermes_cli.plugins.VALID_HOOKS` has at least one core fire site. This table names the function that fires each one, so you can read the exact call and payload. Paths are relative to the repository root. When you add a hook, add its row here in the same change.
@@ -1809,6 +1845,7 @@ Every name in `hermes_cli.plugins.VALID_HOOKS` has at least one core fire site. 
 | `on_skill_lifecycle` | `tools/skill_usage.py` `_emit_skill_lifecycle` |
 | `subagent_start` | `tools/delegate_tool.py` `_build_child_agent` |
 | `subagent_stop` | `tools/delegate_tool_results.py` `_fire_subagent_stop_hooks` |
+| `gateway_thread_route` | `plugins/platforms/discord/thread_routing.py` `_choose`, only with `discord.thread_routing: plugin`; bounded closed-set decision under the message's runtime profile scope |
 | `pre_gateway_dispatch` | `gateway/run_inbound_hooks.py` `GatewayInboundHooksMixin._hm_pre_gateway_dispatch_hook`; webhook and relay ingress: `gateway/platforms/webhook_ingress.py` `_admit_once` |
 | `post_gateway_admission` | `gateway/run_inbound_consumer.py` `run_post_admission_hook`; `gateway/platforms/webhook_ingress.py` `_admit_once` |
 | `agent_loop_stopped` | `gateway/run_agent_cache.py` `GatewayAgentCacheMixin._interrupt_and_clear_session`; `tui_gateway/session_lifecycle.py` `_interrupt_session_turn` |
