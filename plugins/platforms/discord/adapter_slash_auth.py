@@ -1,12 +1,11 @@
 """Slash-command authorization verdict for the Discord adapter: the on_message gates, side-effect free."""
 from __future__ import annotations
 
-from typing import Any, Callable, Optional, Tuple
+import importlib
+from typing import TYPE_CHECKING, Any, Callable, Optional, Tuple
 
-try:
+if TYPE_CHECKING:
     import discord
-except ImportError:  # the adapter does not start without discord.py
-    discord = None
 
 
 class DiscordSlashAuthMixin:
@@ -29,6 +28,12 @@ class DiscordSlashAuthMixin:
         Fail closed on malformed payloads: with an allowlist, a missing channel id/user REJECTS.
         """
         self._refresh_live_gates()  # a config.yaml edit applies to the next invocation
+        # The owning adapter may have lazy-installed discord.py after this mixin loaded.
+        # Resolve the dependency itself, not a separately imported canonical adapter.
+        try:
+            discord = importlib.import_module("discord")
+        except ImportError:
+            return (False, "discord dependency unavailable")
         chan_obj = getattr(interaction, "channel", None)
         in_dm = isinstance(chan_obj, discord.DMChannel) if chan_obj is not None else False
         channel_ids: set = set()
