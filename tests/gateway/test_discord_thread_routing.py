@@ -1,4 +1,5 @@
 """Selective routing exercises Discord's real message-to-session path, offline."""
+from contextlib import nullcontext
 from datetime import datetime, UTC
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -32,7 +33,7 @@ def message(channel, ident=100, text="<@999> build a migration", user=42):
 
 
 @pytest.fixture
-def rig(monkeypatch):
+def rig(monkeypatch, tmp_path):
     monkeypatch.setattr(discord_platform.discord, "Thread", Thread)
     guild = SimpleNamespace(id=1, name="server", me=SimpleNamespace(id=999))
     parent = SimpleNamespace(id=700, name="ops", topic=None, guild=guild)
@@ -41,6 +42,9 @@ def rig(monkeypatch):
     adapter._client = SimpleNamespace(user=SimpleNamespace(id=999), get_channel=lambda _: thread)
     adapter._text_batch_delay_seconds = 0
     adapter.set_authorization_check(lambda *args, **kwargs: True)
+    adapter.gateway_runner = SimpleNamespace(_async_profile_scope_for_source=lambda source: nullcontext())
+    monkeypatch.setattr(adapter, "_canonicalize", lambda source: SimpleNamespace(
+        runtime_home=tmp_path, runtime_profile="default"))
     adapter._discord_history_backfill = lambda: False
     adapter._auto_create_thread = AsyncMock(return_value=thread)
     adapter.handle_message = AsyncMock()
@@ -268,3 +272,16 @@ def test_thread_routing_config_defaults_and_gateway_reader(tmp_path, monkeypatch
     (tmp_path / "config.yaml").write_text("discord:\n  thread_routing: plugin\n")
     monkeypatch.setenv("DISCORD_BOT_TOKEN", "synthetic-token")
     assert load_gateway_config().platforms[Platform.DISCORD].extra["thread_routing"] == "plugin"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("missing", ["runner", "identity"])
+async def test_unresolved_runtime_never_invokes_policy(rig, missing, monkeypatch):
+    adapter, parent, _thread, hook = rig
+    if missing == "runner":
+        adapter.gateway_runner = None
+    else:
+        monkeypatch.setattr(adapter, "_canonicalize", lambda source: None)
+    assert await adapter._handle_message(message(parent))
+    hook.assert_not_awaited()
+    assert adapter.handle_message.await_args.args[0].source.chat_id == "700"

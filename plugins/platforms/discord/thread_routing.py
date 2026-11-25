@@ -68,12 +68,10 @@ async def route_message(adapter, message):
         source = _source(adapter, message)
         identity = adapter._canonicalize(source)
         runner = getattr(adapter, "gateway_runner", None)
-        if runner is not None:
-            if identity is None:
-                return None, False
-            async with runner._async_profile_scope_for_source(source):
-                return await _choose(adapter, message, identity)
-        return await _choose(adapter, message, identity)
+        if runner is None or identity is None:
+            return None, False
+        async with runner._async_profile_scope_for_source(source):
+            return await _choose(adapter, message, identity)
     except Exception as error:  # health: allow BLE001 -- plugin/SDK failure must not consume input; log only its class, never a potentially sensitive exception body or traceback
         logging.getLogger(__name__).warning("Thread routing failed (%s); using inline", type(error).__name__)
         return None, False
